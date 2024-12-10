@@ -32464,6 +32464,9 @@
 	"ds": [
 		"JR-East.ChuoRapid.Tokyo"
 	],
+	"nt": [
+		"JR-East.ChuoRapid.726T.SaturdayHoliday"
+	],
 	"tt": [{
 		"s": "JR-East.Ome.Ome",
 		"d": "07:31"

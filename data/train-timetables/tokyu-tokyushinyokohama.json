@@ -9320,6 +9320,9 @@
 	"ds": [
 		"Tokyu.Meguro.MusashiKosugi"
 	],
+	"nt": [
+		"Tokyu.Toyoko.065212.Weekday"
+	],
 	"tt": [{
 		"s": "Tokyu.TokyuShinYokohama.ShinYokohama",
 		"d": "21:59"
@@ -9703,6 +9706,9 @@
 	],
 	"ds": [
 		"Tokyu.Meguro.MusashiKosugi"
+	],
+	"nt": [
+		"Tokyu.Toyoko.064242.Weekday"
 	],
 	"tt": [{
 		"s": "Tokyu.TokyuShinYokohama.ShinYokohama",
