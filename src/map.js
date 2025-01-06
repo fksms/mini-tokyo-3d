@@ -13,32 +13,16 @@ import {pickObject} from './helpers/helpers-deck';
 import * as helpersGeojson from './helpers/helpers-geojson';
 import * as helpersMapbox from './helpers/helpers-mapbox';
 import {GeoJsonLayer, ThreeLayer, Tile3DLayer, TrafficLayer} from './layers';
-import {loadDynamicFlightData, loadDynamicTrainData, loadStaticData, loadTimetableData} from './loader';
-import {AboutPanel, LayerPanel, SharePanel, StationPanel, TrackingModePanel, TrainPanel} from './panels';
+import {loadBusData, loadDynamicBusData, loadDynamicFlightData, loadDynamicTrainData, loadStaticData, loadTimetableData, updateOdptUrl} from './loader';
+import {AboutPanel, BusPanel, LayerPanel, SharePanel, StationPanel, TrackingModePanel, TrainPanel} from './panels';
 import Plugin from './plugin';
+import nearestCloserPointOnLine from './turf/nearest-closer-point-on-line';
 
-const RAILWAY_CHUORAPID = 'JR-East.ChuoRapid',
-    RAILWAY_OME = 'JR-East.Ome',
-    RAILWAY_NAMBOKU = 'TokyoMetro.Namboku',
+const RAILWAY_NAMBOKU = 'TokyoMetro.Namboku',
     RAILWAY_MITA = 'Toei.Mita',
     RAILWAY_ARAKAWA = 'Toei.Arakawa';
 
-const TRAINTYPE_JREAST_LIMITEDEXPRESS = 'JR-East.LimitedExpress';
-
 const AIRLINES_FOR_ANA_CODE_SHARE = ['ADO', 'SFJ', 'SNJ'];
-
-const WITH_GREEN_CARS = {
-    en: 'With double-decker green cars',
-    es: 'Con vagones verdes de dos niveles',
-    fr: 'Avec des voitures vertes à deux étages',
-    ja: '2階建てグリーン車連結',
-    ko: '2층 그린차 연결',
-    ne: 'डबल डेकर हरियो कारहरु संग',
-    pt: 'Com carros verdes de dois andares',
-    th: 'การเชื่อมต่อรถสีเขียวสองชั้น',
-    'zh-Hans': '双层绿色车厢连接',
-    'zh-Hant': '雙層綠色車廂連接'
-};
 
 const DEGREE_TO_RADIAN = Math.PI / 180;
 
@@ -91,6 +75,7 @@ export default class extends Evented {
             bearing: configs.defaultBearing,
             pitch: configs.defaultPitch,
             dataUrl: configs.dataUrl,
+            dataSources: configs.dataSources,
             clockControl: true,
             searchControl: true,
             navigationControl: true,
@@ -104,10 +89,14 @@ export default class extends Evented {
 
         me.lang = helpers.getLang(options.lang);
         me.dataUrl = options.dataUrl;
+        me.dataSources = options.dataSources.map(({gtfsUrl, vehiclePositionUrl, color}) => ({
+            gtfsUrl: updateOdptUrl(gtfsUrl, options.secrets),
+            vehiclePositionUrl: updateOdptUrl(vehiclePositionUrl, options.secrets),
+            color
+        }));
         me.container = typeof options.container === 'string' ?
             document.getElementById(options.container) : options.container;
         me.secrets = options.secrets;
-        me.trainPopupObjects = [];
         me.exitPopups = [];
 
         me.clockControl = options.clockControl;
@@ -172,6 +161,8 @@ export default class extends Evented {
                 me.map.once('styledata', resolve);
             })
         ]).then(me.initialize.bind(me));
+
+        me.refreshBusData();
     }
 
     /**
@@ -377,7 +368,7 @@ export default class extends Evented {
     getSelection() {
         const trackedObject = this.trackedObject;
 
-        if (isTrainOrFlight(trackedObject)) {
+        if (isVehicle(trackedObject)) {
             return trackedObject.object.id;
         } else if (isStation(trackedObject)) {
             return trackedObject.stations;
@@ -665,6 +656,8 @@ export default class extends Evented {
         me.realtimeTrains = new Set();
         me.activeFlightLookup = new Map();
         me.flightLookup = new Map();
+
+        me.gtfs = new Map();
     }
 
     initialize() {
@@ -854,6 +847,11 @@ export default class extends Evented {
         // Workaround for deck.gl #3522
         map.__deck.props.getCursor = () => map.getCanvas().style.cursor;
 
+        map.addSource('odpt', {
+            type: 'geojson',
+            data: helpersGeojson.featureFilter(featureCollection, p => p.altitude === 0)
+        });
+
         for (const zoom of [13, 14, 15, 16, 17, 18]) {
             const interpolate = ['interpolate', ['exponential', 2], ['zoom']],
                 width = ['get', 'width'],
@@ -861,20 +859,18 @@ export default class extends Evented {
                 lineWidth =
                     zoom === 13 ? [...interpolate, 9, ['/', width, 8], 12, width] :
                     zoom === 18 ? [...interpolate, 19, width, 22, ['*', width, 8]] :
-                    width,
-                [railwayData, stationData] = [0, 1].map(type => helpersGeojson.featureFilter(
-                    featureCollection,
-                    p => p.zoom === zoom && p.type === type && p.altitude === 0
-                ));
+                    width;
 
             for (const key of ['railways', 'stations', 'stations-outline']) {
                 map.addLayer({
                     id: `${key}-og-${zoom}`,
                     type: key === 'stations' ? 'fill' : 'line',
-                    source: {
-                        type: 'geojson',
-                        data: key === 'railways' ? railwayData : stationData,
-                    },
+                    source: 'odpt',
+                    filter: [
+                        'all',
+                        ['==', ['get', 'zoom'], zoom],
+                        ['==', ['get', 'type'], key === 'railways' ? 0 : 1]
+                    ],
                     layout: {
                         visibility: zoom === layerZoom ? 'visible' : 'none'
                     },
@@ -1098,6 +1094,17 @@ export default class extends Evented {
                     me.setLayerVisibility(`${key}-og-${layerZoom}`, 'visible');
                 }
 
+                for (const {id} of me.gtfs.values()) {
+                    for (const key of ['busstops', 'busstops-outline']) {
+                        if (prevLayerZoom >= 14) {
+                            me.setLayerVisibility(`${key}-${id}-og-${prevLayerZoom}`, 'none');
+                        }
+                        if (layerZoom >= 14) {
+                            me.setLayerVisibility(`${key}-${id}-og-${layerZoom}`, 'visible');
+                        }
+                    }
+                }
+
                 if (e.tracking) {
                     me.prevLayerZoom = prevLayerZoom;
                 } else {
@@ -1123,7 +1130,6 @@ export default class extends Evented {
                 // because the adjustment for altitude is required
                 me.updatePopup();
             }
-            me.updateTrainPopup();
         });
 
         for (const plugin of me.plugins.slice().reverse()) {
@@ -1136,10 +1142,11 @@ export default class extends Evented {
             callback: () => {
                 const clock = me.clock,
                     now = clock.getTime(),
-                    {minDelay, trainRefreshInterval} = configs;
+                    {minDelay, realtimeCheckInterval} = configs;
 
                 if (now - me.lastTimetableRefresh >= 86400000) {
-                    me.loadTimetableData();
+                    me.refreshTrainTimetableData();
+                    me.refreshBusData();
                     me.lastTimetableRefresh = clock.getTime('03:00');
                 }
 
@@ -1151,13 +1158,14 @@ export default class extends Evented {
 
                 me.updateVisibleArea();
 
-                if (Math.floor((now - minDelay) / trainRefreshInterval) !== Math.floor(me.lastTrainRefresh / trainRefreshInterval)) {
+                if (Math.floor((now - minDelay) / realtimeCheckInterval) !== Math.floor(me.lastTrainRefresh / realtimeCheckInterval)) {
                     helpersMapbox.setStyleColors(map, me.styleColors, me.getLightColor());
                     helpersMapbox.setSunlight(map, now);
                     if (me.searchMode === 'none') {
                         if (me.clockMode === 'realtime') {
-                            me.loadRealtimeTrainData();
-                            me.loadRealtimeFlightData();
+                            me.refreshRealtimeTrainData();
+                            me.refreshRealtimeFlightData();
+                            me.refreshRealtimeBusData();
                         } else {
                             me.refreshTrains();
                             me.refreshFlights();
@@ -1169,7 +1177,7 @@ export default class extends Evented {
                     me.lastTrainRefresh = now - minDelay;
                 }
 
-                if (!isTrainOrFlight(me.trackedObject) && ((me.ecoMode === 'normal' && map._loaded) || Date.now() - me.lastRepaint >= 1000 / me.ecoFrameRate)) {
+                if (!isVehicle(me.trackedObject) && ((me.ecoMode === 'normal' && map._loaded) || Date.now() - me.lastRepaint >= 1000 / me.ecoFrameRate)) {
                     if (me.trackedObject) {
                         me.refreshStationOutline();
                     }
@@ -1180,6 +1188,7 @@ export default class extends Evented {
         });
 
         me.initialized = true;
+        me.fire({type: 'initialized'});
     }
 
     _jumpTo(options) {
@@ -1365,9 +1374,6 @@ export default class extends Evented {
             if (tracked === car) {
                 me.trackObject(car);
             }
-            if (hasGreenCars(train)) {
-                me.showTrainPopup(car);
-            }
             if (me.markedObject === car) {
                 car.outline = 1;
             } else if (me.trackedObject === car) {
@@ -1474,6 +1480,73 @@ export default class extends Evented {
         }
     }
 
+    updateBusProps(bus) {
+        const sectionIndex = bus.sectionIndex,
+            stopOffsets = bus.offsets,
+            offset = bus.offset = stopOffsets[sectionIndex];
+
+        bus.interval = stopOffsets[sectionIndex + bus.sectionLength] - offset;
+    }
+
+    updateBusShape(bus, t) {
+        const me = this,
+            {map, trafficLayer} = me,
+            animationID = bus.animationID;
+        let car = bus.car;
+
+        if (t !== undefined) {
+            bus._t = t;
+        }
+        if (bus._t === undefined) {
+            return;
+        }
+
+        if (car === undefined) {
+            car = bus.car = {
+                type: 'bus',
+                object: bus,
+                color: me.gtfs.get(bus.gtfsId).color
+            };
+        }
+
+        const {coord, altitude, bearing, pitch} = helpersGeojson.getCoordAndBearing(bus.feature, bus.offset + bus._t * bus.interval, 1, 0)[0];
+
+        car.coord = coord;
+        car.altitude = altitude;
+        car.bearing = bearing;
+        car.pitch = pitch;
+
+        if (me.markedObject === car) {
+            car.outline = 1;
+        } else if (me.trackedObject === car) {
+            car.outline = helpers.blink();
+        } else {
+            car.outline = 0;
+        }
+
+        if (me.trackedObject === car && !me.viewAnimationID && !map._zooming && !map._rotating && !map._pitching) {
+            me._jumpTo({center: coord, altitude, bearing: car.bearing, bearingFactor: .02});
+        }
+
+        // Reduce the frame rate of invisible objects for performance optimization
+        if (animation.isActive(animationID)) {
+            const {x, y} = me.getModelPosition(coord),
+                frameRate = helpers.pointInTrapezoid([x, y], me.visibleArea) || me.trackedObject === car ? me.ecoMode === 'normal' && map._loaded ? 0 : me.ecoFrameRate : 1;
+
+            animation.setFrameRate(animationID, frameRate);
+        }
+
+        if (car.meshIndex === undefined) {
+            trafficLayer.addObject(car);
+        } else {
+            trafficLayer.updateObject(car);
+        }
+
+        if (me.trackedObject === car && me.markedObject === car) {
+            me.updatePopup();
+        }
+    }
+
     refreshTrains() {
         const me = this,
             initialSelection = me.initialSelection,
@@ -1569,7 +1642,7 @@ export default class extends Evented {
                 duration: timetable ?
                     // Set minimum duration to 0 if clock speed is high because the time typically advances
                     Math.max(departureTime - clock.getTimeOffset(), clock.speed === 1 ? minStandingDuration : 0) :
-                    final ? minStandingDuration : configs.realtimeTrainCheckInterval,
+                    final ? minStandingDuration : configs.realtimeCheckInterval,
                 clock
             });
         }
@@ -1750,6 +1823,94 @@ export default class extends Evented {
         }, flight.feature.properties.length, flight.maxSpeed, flight.acceleration, elapsed, clock);
     }
 
+    busStart(bus) {
+        const me = this;
+
+        if (!me.setBusSectionData(bus)) {
+            return;
+        }
+        me.gtfs.get(bus.gtfsId).activeBusLookup.set(bus.trip.id, bus);
+        me.updateBusProps(bus);
+
+        // Sometimes bus.interval becomes 0 because the busroute coordinates
+        // are incorrect and a few busstops shares the same coordinates.
+        if (bus.sectionLength > 0 && bus.interval === 0) {
+            console.log('bus zero interval:', bus);
+        }
+
+        if (bus.sectionLength > 0 && bus.interval > 0) {
+            me.busRepeat(bus);
+        } else {
+            me.busStand(bus);
+        }
+    }
+
+    busStand(bus) {
+        const me = this;
+        let final = false;
+
+        if (me.setBusSectionData(bus, !me.gtfs.get(bus.gtfsId).realtimeBuses.has(bus.trip.id))) {
+            me.updateBusProps(bus);
+            me.updateBusShape(bus, 0);
+        } else {
+            final = true;
+        }
+
+        // Sometimes bus.interval becomes 0 because the busroute coordinates
+        // are incorrect and a few busstops shares the same coordinates.
+        if (bus.sectionLength > 0 && bus.interval === 0) {
+            console.log('bus zero interval:', bus);
+        }
+
+        if (bus.sectionLength > 0 && bus.interval > 0) {
+            me.busRepeat(bus);
+        } else {
+            const {markedObject, trackedObject} = me;
+
+            if (markedObject && markedObject.object === bus) {
+                me.updatePopup({setHTML: true});
+            }
+            if (trackedObject && trackedObject.object === bus && me.detailPanel) {
+                me.detailPanel.updateHeader();
+            }
+            bus.animationID = animation.start({
+                callback: () => {
+                    const trackedObject = me.trackedObject;
+
+                    if (trackedObject && trackedObject.object === bus) {
+                        me.updateBusShape(bus);
+                    }
+                },
+                complete: () => {
+                    if (final) {
+                        me.stopBus(bus);
+                    } else {
+                        me.busStand(bus);
+                    }
+                },
+                duration: configs.realtimeCheckInterval,
+                clock: me.clock
+            });
+        }
+    }
+
+    busRepeat(bus) {
+        const me = this,
+            {markedObject, trackedObject} = me;
+
+        if (markedObject && markedObject.object === bus) {
+            me.updatePopup({setHTML: true});
+        }
+        if (trackedObject && trackedObject.object === bus && me.detailPanel) {
+            me.detailPanel.updateHeader();
+        }
+        bus.animationID = startBusAnimation(t => {
+            me.updateBusShape(bus, t);
+        }, () => {
+            me.busStand(bus);
+        }, Math.abs(bus.interval), 0, me.clock);
+    }
+
     updateTrackingParams(reset) {
         const me = this,
             {map, trackingMode, trackingParams} = me,
@@ -1816,7 +1977,7 @@ export default class extends Evented {
             {map, trackedObject, trackingMode} = me,
             handlers = ['scrollZoom', 'boxZoom', 'dragRotate', 'dragPan', 'keyboard', 'doubleClickZoom', 'touchZoomRotate', 'touchPitch'];
 
-        if (isTrainOrFlight(trackedObject) && trackingMode !== 'position') {
+        if (isVehicle(trackedObject) && trackingMode !== 'position') {
             for (const handler of handlers) {
                 map[handler].disable();
             }
@@ -1825,7 +1986,7 @@ export default class extends Evented {
             for (const handler of handlers) {
                 map[handler].enable();
             }
-            if (isTrainOrFlight(trackedObject) && trackingMode === 'position') {
+            if (isVehicle(trackedObject) && trackingMode === 'position') {
                 map.dragPan.disable();
             }
             me.navControl.enable();
@@ -2008,7 +2169,6 @@ export default class extends Evented {
             `<strong>${dict['train-number']}:</strong> ${train.n}`,
             !train.timetable ? ` <span class="desc-caution">${dict['special']}</span>` : '',
             '<br>',
-            hasGreenCars(train) ? `<span class="desc-green-cars">${WITH_GREEN_CARS[lang]}</span><br>` : '',
             delay >= 60000 ? '<span class="desc-caution">' : '',
             '<strong>',
             dict[train.standing ? 'standing-at' : 'previous-stop'],
@@ -2061,6 +2221,31 @@ export default class extends Evented {
         ].join('');
     }
 
+    getBusDescription(bus) {
+        const me = this,
+            dict = me.dict,
+            gtfs = me.gtfs.get(bus.gtfsId),
+            stopLookup = gtfs.stopLookup,
+            trip = bus.trip,
+            {shortName, headsigns, stops} = trip,
+            nextStopIndex = bus.sectionIndex + bus.sectionLength,
+            nextStopName = stopLookup.get(stops[nextStopIndex]).name,
+            prevStopIndex = Math.max(0, nextStopIndex - 1),
+            prevStopName = stopLookup.get(stops[prevStopIndex]).name;
+
+        return [
+            '<div class="desc-header">',
+            `<div style="background-color: ${gtfs.color};"></div>`,
+            `<div><strong>${gtfs.agency}</strong><br>`,
+            shortName ? ` <span class="bus-route-label" style="color: ${trip.textColor}; background-color: ${trip.color};">${shortName}</span> ` : '',
+            headsigns[headsigns.length === 1 ? 0 : prevStopIndex],
+            '</div></div>',
+            `<strong>${dict['vehicle-number']}:</strong> ${bus.id}`,
+            `<br><strong>${dict['previous-busstop']}:</strong> ${prevStopName}`,
+            `<br><strong>${dict['next-busstop']}:</strong> ${nextStopName}`
+        ].join('');
+    }
+
     /**
      * Check if any of connecting trains is active
      * @param {Object} train - train to check
@@ -2100,7 +2285,6 @@ export default class extends Evented {
         if (cars) {
             for (const car of cars) {
                 me.trafficLayer.removeObject(car);
-                me.hideTrainPopup(car);
                 if (car === me.markedObject && !keep) {
                     me.markObject();
                 }
@@ -2141,6 +2325,22 @@ export default class extends Evented {
         me.activeFlightLookup.delete(flight.id);
     }
 
+    stopBus(bus) {
+        const me = this,
+            car = bus.car;
+
+        animation.stop(bus.animationID);
+        me.trafficLayer.removeObject(car);
+        if (car === me.markedObject) {
+            me.markObject();
+        }
+        if (car === me.trackedObject) {
+            me.trackObject();
+        }
+        delete bus.car;
+        me.gtfs.get(bus.gtfsId).activeBusLookup.delete(bus.trip.id);
+    }
+
     stopAll() {
         const me = this;
 
@@ -2152,6 +2352,12 @@ export default class extends Evented {
         }
         me.standbyTrainLookup.clear();
         me.realtimeTrains.clear();
+        for (const {activeBusLookup, realtimeBuses} of me.gtfs.values()) {
+            for (const bus of activeBusLookup.values()) {
+                me.stopBus(bus);
+            }
+            realtimeBuses.clear();
+        }
         delete me.lastTrainRefresh;
     }
 
@@ -2163,7 +2369,7 @@ export default class extends Evented {
         }
     }
 
-    loadTimetableData() {
+    refreshTrainTimetableData() {
         const me = this;
 
         showLoader(me.container);
@@ -2175,7 +2381,185 @@ export default class extends Evented {
         });
     }
 
-    loadRealtimeTrainData() {
+    refreshBusData() {
+        const me = this;
+
+        loadBusData(me.dataSources, me.lang).then(data =>
+            new Promise(resolve => me.initialized ? resolve(data) : me.once('initialized', () => resolve(data)))
+        ).then(data => {
+            const map = me.map;
+
+            for (const {id, activeBusLookup, layerIds} of me.gtfs.values()) {
+                for (const bus of activeBusLookup.values()) {
+                    me.stopBus(bus);
+                }
+
+                for (const layerId of layerIds) {
+                    me.removeLayer(layerId);
+                    for (let i = 0, ilen = me.styleOpacities.length; i < ilen; i++) {
+                        if (me.styleOpacities[i].id === layerId) {
+                            me.styleOpacities.splice(i, 1);
+                            break;
+                        }
+                    }
+                }
+                map.removeSource(`gtfs-${id}`);
+
+                me.gtfs.delete(id);
+            }
+
+            for (const item of data) {
+                const {agency, featureCollection, version} = item,
+                    id = `${agency}.${version}`,
+                    featureLookup = new Map(),
+                    stopLookup = new Map(),
+                    tripLookup = new Map(),
+                    layerIds = new Set(),
+                    source = `gtfs-${id}`;
+
+                featureEach(featureCollection, feature => {
+                    const properties = feature.properties;
+
+                    if (properties.type === 0) {
+                        featureLookup.set(properties.id, feature);
+                    }
+                });
+                for (const stop of item.stops) {
+                    stopLookup.set(stop.id, stop);
+                }
+                for (const trip of item.trips) {
+                    tripLookup.set(trip.id, trip);
+                }
+                me.gtfs.set(id, {
+                    id,
+                    agency,
+                    version,
+                    featureLookup,
+                    stopLookup,
+                    tripLookup,
+                    layerIds,
+                    activeBusLookup: new Map(),
+                    realtimeBuses: new Set(),
+                    vehiclePositionUrl: item.vehiclePositionUrl,
+                    color: item.color
+                });
+
+                map.addSource(source, {
+                    type: 'geojson',
+                    data: featureCollection
+                });
+
+                me.addLayer({
+                    id: `busroute-${id}-og-`,
+                    type: 'line',
+                    source,
+                    filter: ['==', ['get', 'type'], 0],
+                    paint: {
+                        'line-color': ['get', 'color'],
+                        'line-width': [
+                            'interpolate',
+                            ['exponential', 2],
+                            ['zoom'],
+                            11,
+                            ['/', ['get', 'width'], 2],
+                            12,
+                            ['get', 'width'],
+                            19,
+                            ['get', 'width'],
+                            22,
+                            ['*', ['get', 'width'], 8]
+                        ]
+                    },
+                    metadata: {
+                        'mt3d:opacity-effect': true,
+                        'mt3d:opacity': 1,
+                        'mt3d:opacity-route': 0.1,
+                        'mt3d:opacity-underground': 0.25,
+                        'mt3d:opacity-underground-route': 0.1
+                    }
+                }, 'railways-og-13');
+                layerIds.add(`busroute-${id}-og-`);
+
+                for (const zoom of [14, 15, 16, 17, 18]) {
+                    const interpolate = ['interpolate', ['exponential', 2], ['zoom']],
+                        width = ['get', 'width'],
+                        lineWidth = zoom === 18 ? [...interpolate, 19, width, 22, ['*', width, 8]] : width;
+
+                    for (const key of ['busstops', 'busstops-outline']) {
+                        me.addLayer({
+                            id: `${key}-${id}-og-${zoom}`,
+                            type: key === 'busstops' ? 'fill' : 'line',
+                            source,
+                            filter: ['all', ['==', ['get', 'zoom'], zoom], ['==', ['get', 'type'], 1]],
+                            layout: {
+                                visibility: zoom === me.layerZoom ? 'visible' : 'none'
+                            },
+                            paint: {
+                                'busstops': {
+                                    'fill-color': ['get', 'color'],
+                                    'fill-opacity': .7
+                                },
+                                'busstops-outline': {
+                                    'line-color': ['get', 'outlineColor'],
+                                    'line-width': lineWidth
+                                }
+                            }[key],
+                            metadata: {
+                                'mt3d:opacity-effect': true,
+                                'mt3d:opacity': 1,
+                                'mt3d:opacity-route': 0.1,
+                                'mt3d:opacity-underground': 0.25,
+                                'mt3d:opacity-underground-route': 0.1
+                            }
+                        }, 'railways-og-13');
+                        layerIds.add(`${key}-${id}-og-${zoom}`);
+                    }
+                }
+
+                me.addLayer({
+                    id: `busstops-poi-${id}`,
+                    type: 'symbol',
+                    source,
+                    filter: ['==', ['get', 'type'], 2],
+                    layout: {
+                        'text-field': ['get', 'name'],
+                        'text-font': [
+                            'Open Sans Bold',
+                            'Arial Unicode MS Bold'
+                        ],
+                        'text-max-width': 9,
+                        'text-padding': 2,
+                        'text-size': 12,
+                        'text-anchor': 'bottom',
+                        'text-offset': [0, -1]
+                    },
+                    paint: {
+                        'text-color': 'rgba(102,102,102,1)',
+                        'text-halo-blur': 0.5,
+                        'text-halo-color': 'rgba(255,255,255,1)',
+                        'text-halo-width': 1
+                    },
+                    minzoom: 14
+                });
+                layerIds.add(`busstops-poi-${id}`);
+            }
+
+            const existingLayerIds = new Set(me.styleOpacities.map(({id}) => id));
+
+            for (const item of helpersMapbox.getStyleOpacities(map, 'mt3d:opacity-effect')) {
+                if (!existingLayerIds.has(item.id)) {
+                    me.styleOpacities.push(item);
+                }
+            }
+            me.refreshMap();
+
+            if (me.clockMode === 'realtime') {
+                me.refreshRealtimeBusData();
+            }
+        });
+    }
+
+    refreshRealtimeTrainData() {
         const me = this;
 
         loadDynamicTrainData(me.secrets).then(({trainData, trainInfoData}) => {
@@ -2287,7 +2671,7 @@ export default class extends Evented {
         });
     }
 
-    loadRealtimeFlightData() {
+    refreshRealtimeFlightData() {
         const me = this;
 
         loadDynamicFlightData(me.secrets).then(({atisData, flightData}) => {
@@ -2507,6 +2891,79 @@ export default class extends Evented {
         });
     }
 
+    refreshRealtimeBusData() {
+        const me = this;
+
+        loadDynamicBusData([...me.gtfs.values()]).then(data => {
+            for (const {gtfs, vehiclePosition} of data) {
+                const {id: gtfsId, featureLookup, stopLookup, tripLookup, activeBusLookup, realtimeBuses} = gtfs;
+
+                realtimeBuses.clear();
+                gtfs.date = me.clock.getString(vehiclePosition.header.timestamp * 1000);
+
+                for (const {id, vehicle: vp} of vehiclePosition.entity) {
+                    const vehicle = vp.vehicle,
+                        stop = vp.currentStopSequence,
+                        position = vp.position,
+                        tripId = vp.trip && vp.trip.tripId;
+
+                    if (!(stop || position) || !tripId) {
+                        continue;
+                    }
+
+                    const busTrip = tripLookup.get(tripId),
+                        feature = busTrip && featureLookup.get(busTrip.shape);
+
+                    if (!busTrip || !feature) {
+                        continue;
+                    }
+
+                    const isActive = activeBusLookup.has(tripId);
+                    let bus;
+
+                    if (isActive) {
+                        bus = activeBusLookup.get(tripId);
+                    } else {
+                        let offset = 0;
+                        const offsets = busTrip.stops.map(stopId =>
+                            // Use the previous offset to calulate a weight and pick a closer point
+                            (offset = nearestCloserPointOnLine(feature, stopLookup.get(stopId).coord, offset).properties.location)
+                        );
+
+                        bus = {
+                            id: vehicle ? vehicle.license_plate || vehicle.id : id,
+                            gtfsId,
+                            trip: busTrip,
+                            feature,
+                            offsets,
+                            offset: 0
+                        };
+                    }
+                    if (stop) {
+                        bus.stop = stop;
+                    } else {
+                        const offsets = bus.offsets,
+                            // Use the current bus.offset to calulate a weight and pick a closer point
+                            offset = nearestCloserPointOnLine(feature, [position.longitude, position.latitude], bus.offset).properties.location;
+
+                        bus.stop = busTrip.stopSequences[offsets.reduce(
+                            (acc, cur, i) => cur < offset ? Math.min(i + 1, offsets.length - 1) : acc, 0
+                        )];
+                    }
+                    if (!isActive) {
+                        me.busStart(bus);
+                    }
+
+                    realtimeBuses.add(tripId);
+                }
+            }
+
+            me.aboutPanel.updateContent();
+        }).catch(error => {
+            console.log(error);
+        });
+    }
+
     updateUndergroundButton(mode) {
         const {container, dict} = this,
             button = container.querySelector('.mapboxgl-ctrl-underground');
@@ -2603,7 +3060,7 @@ export default class extends Evented {
         }
 
         me.trackingMode = mode;
-        if (isTrainOrFlight(me.trackedObject)) {
+        if (isVehicle(me.trackedObject)) {
             me.updateBaseZoom();
             me.updateTrackingParams(true);
             me.updateHandlersAndControls();
@@ -2653,7 +3110,7 @@ export default class extends Evented {
         me.trackObject();
 
         if (me.lastTimetableRefresh !== baseTime) {
-            me.loadTimetableData();
+            me.refreshTrainTimetableData();
             me.lastTimetableRefresh = baseTime;
         }
     }
@@ -2701,7 +3158,7 @@ export default class extends Evented {
         }
 
         if (markedObject) {
-            if (isTrainOrFlight(markedObject)) {
+            if (isVehicle(markedObject)) {
                 markedObject.outline = 0;
                 trafficLayer.updateObject(markedObject);
             } else {
@@ -2714,7 +3171,7 @@ export default class extends Evented {
             }
         }
 
-        if (object) {
+        if (object && !object.removing) {
             me.markedObject = object;
             map.getCanvas().style.cursor = 'pointer';
 
@@ -2734,15 +3191,13 @@ export default class extends Evented {
             });
             me.updatePopup({setHTML: true, addToMap: true});
 
-            if (isTrainOrFlight(object)) {
+            if (isVehicle(object)) {
                 object.outline = 1;
                 trafficLayer.updateObject(object);
             } else {
                 me.addStationOutline(object, 'stations-marked');
             }
         }
-
-        me.updateTrainPopup();
     }
 
     trackObject(object) {
@@ -2758,7 +3213,7 @@ export default class extends Evented {
         }
 
         if (isEqualObject(trackedObject, object)) {
-            if ((isTrainOrFlight(object) || isStation(object)) && me.detailPanel) {
+            if ((isVehicle(object) || isStation(object)) && me.detailPanel) {
                 me.detailPanel.reset();
             }
             return;
@@ -2782,7 +3237,7 @@ export default class extends Evented {
         }
 
         if (trackedObject) {
-            if (isTrainOrFlight(trackedObject)) {
+            if (isVehicle(trackedObject)) {
                 const prevObject = trackedObject.object;
 
                 trackedObject.outline = 0;
@@ -2809,10 +3264,10 @@ export default class extends Evented {
             }
         }
 
-        if (object) {
+        if (object && !object.removing) {
             me.trackedObject = object;
 
-            if (isTrainOrFlight(object)) {
+            if (isVehicle(object)) {
                 const _object = object.object;
 
                 me.updateBaseZoom();
@@ -2821,12 +3276,15 @@ export default class extends Evented {
                 me.startViewAnimation();
                 me._setViewMode(object.altitude < 0 ? 'underground' : 'ground');
 
-                if (me.clockMode === 'realtime' && navigator.share) {
+                if (helpers.includes(['train', 'flight'], object.type) && me.clockMode === 'realtime' && navigator.share) {
                     me.sharePanel = new SharePanel({object: _object});
                     me.sharePanel.addTo(me);
                 }
                 if (_object.timetable) {
                     me.detailPanel = new TrainPanel({object: _object});
+                    me.detailPanel.addTo(me);
+                } else if (_object.trip) {
+                    me.detailPanel = new BusPanel({object: _object});
                     me.detailPanel.addTo(me);
                 }
 
@@ -2873,57 +3331,6 @@ export default class extends Evented {
                 me.fire(Object.assign({type: 'selection'}, object));
             }
         }
-    }
-
-    showTrainPopup(object) {
-        const me = this,
-            trainPopupObjects = me.trainPopupObjects;
-
-        if (trainPopupObjects.indexOf(object) !== -1) {
-            return;
-        }
-        object.popup = new AnimatedPopup({
-            className: 'popup-green-cars',
-            closeButton: false,
-            closeOnClick: false,
-            offset: {
-                top: [0, 10],
-                bottom: [0, -30]
-            }
-        });
-        object.popup.setHTML('');
-        trainPopupObjects.push(object);
-        me.updateTrainPopup();
-    }
-
-    updateTrainPopup() {
-        const me = this,
-            markedObject = me.markedObject;
-
-        for (const object of me.trainPopupObjects) {
-            object.popup.setLngLat(me.adjustCoord(object.coord, object.altitude));
-            if (object !== markedObject && !object.popupVisible) {
-                object.popup.addTo(me.map);
-                object.popupVisible = true;
-            } else if (object === markedObject && object.popupVisible) {
-                object.popup.remove();
-                delete object.popupVisible;
-            }
-        }
-    }
-
-    hideTrainPopup(object) {
-        const me = this,
-            trainPopupObjects = me.trainPopupObjects,
-            index = trainPopupObjects.indexOf(object);
-
-        if (index === -1 || !object.popup) {
-            return;
-        }
-        object.popup.remove();
-        delete object.popup;
-        delete object.popupVisible;
-        trainPopupObjects.splice(index, 1);
     }
 
     showStationExits(stations) {
@@ -2989,7 +3396,7 @@ export default class extends Evented {
         const me = this,
             {map, trackedObject: object} = me;
 
-        if (isTrainOrFlight(object)) {
+        if (isVehicle(object)) {
             const objectZ = me.getModelPosition(object.coord, object.altitude).z,
                 cameraZ = map.getFreeCameraOptions().position.z;
 
@@ -3002,14 +3409,15 @@ export default class extends Evented {
             {markedObject, map, popup} = me,
             {setHTML, addToMap} = options || {};
 
-        if (isTrainOrFlight(markedObject)) {
+        if (isVehicle(markedObject)) {
             const bearing = markedObject === me.trackedObject ? map.getBearing() : undefined;
 
             popup.setLngLat(me.adjustCoord(markedObject.coord, markedObject.altitude, bearing));
             if (setHTML) {
-                popup.setHTML(markedObject.type === 'train' ?
-                    me.getTrainDescription(markedObject.object) :
-                    me.getFlightDescription(markedObject.object)
+                popup.setHTML(
+                    markedObject.type === 'train' ? me.getTrainDescription(markedObject.object) :
+                    markedObject.type === 'flight' ? me.getFlightDescription(markedObject.object) :
+                    me.getBusDescription(markedObject.object)
                 );
             }
         } else {
@@ -3155,6 +3563,25 @@ export default class extends Evented {
         train.arrivalStation = train.arrivalTime = train.nextDepartureTime = undefined;
     }
 
+    setBusSectionData(bus, final) {
+        const stopSequences = bus.trip.stopSequences,
+            currentSection = stopSequences.indexOf(bus.stop);
+
+        // Guard for an unexpected error
+        // Potential data quality issue
+        if (currentSection === -1) {
+            console.log('no bus stop', bus);
+        }
+
+        const finalSection = stopSequences.length - 1,
+            nextSection = Math.min(currentSection + 1, finalSection),
+            actualSection = helpers.numberOrDefault(bus.sectionIndex + bus.sectionLength, currentSection);
+
+        bus.sectionIndex = actualSection;
+        bus.sectionLength = nextSection - actualSection;
+
+        return !final && actualSection !== finalSection;
+    }
 }
 
 function initContainer(container) {
@@ -3273,6 +3700,34 @@ function startFlightAnimation(callback, endCallback, distance, maxSpeed, acceler
     });
 }
 
+function startBusAnimation(callback, endCallback, distance, start, clock) {
+    const {maxBusSpeed, busAcceleration, maxBusAccelerationTime, maxBusAccDistance} = configs;
+    const duration = distance < maxBusAccDistance * 2 ?
+            Math.sqrt(distance / busAcceleration) * 2 :
+            maxBusAccelerationTime * 2 + (distance - maxBusAccDistance * 2) / maxBusSpeed,
+        accelerationTime = Math.min(maxBusAccelerationTime, duration / 2);
+
+    return animation.start({
+        callback: elapsed => {
+            const left = duration - elapsed;
+            let d;
+
+            if (elapsed <= accelerationTime) {
+                d = busAcceleration / 2 * elapsed * elapsed;
+            } else if (left <= accelerationTime) {
+                d = distance - busAcceleration / 2 * left * left;
+            } else {
+                d = maxBusSpeed * (elapsed - accelerationTime / 2);
+            }
+            callback(d / distance);
+        },
+        complete: endCallback,
+        duration,
+        start: start > 0 ? clock.getHighResTime() - start : undefined,
+        clock
+    });
+}
+
 function easeInQuad(t) {
     return t * t;
 }
@@ -3349,8 +3804,8 @@ function getLayerZoom(zoom) {
 //     return Math.pow(2, 14 - helpers.clamp(zoom, 13, 19));
 // }
 
-function isTrainOrFlight(object) {
-    return object && helpers.includes(['train', 'flight'], object.type);
+function isVehicle(object) {
+    return object && helpers.includes(['train', 'flight', 'bus'], object.type);
 }
 
 function isStation(object) {
@@ -3365,8 +3820,4 @@ function isEqualObject(a, b) {
         return true;
     }
     return false;
-}
-
-function hasGreenCars(train) {
-    return helpers.includes([RAILWAY_CHUORAPID, RAILWAY_OME], train.r.id) && train.y.id !== TRAINTYPE_JREAST_LIMITEDEXPRESS && train.carComposition === 12;
 }

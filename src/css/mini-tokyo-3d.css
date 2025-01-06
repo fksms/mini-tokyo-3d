@@ -34,9 +34,6 @@
     transition: opacity 1s linear;
     box-sizing: initial;
 }
-.mini-tokyo-3d .ball-pulse > div {
-    background-color: #777;
-}
 .mini-tokyo-3d #loading-error {
     position: absolute;
     top: 50%;
@@ -363,6 +360,55 @@
     padding-left: 40px;
     font-size: 12px;
     line-height: 20px;
+}
+.mini-tokyo-3d .bus-panel.collapsed {
+    height: 68px;
+}
+.mini-tokyo-3d .bus-panel #panel-header {
+    height: 48px;
+    line-height: 24px;
+}
+.mini-tokyo-3d .bus-panel #panel-body {
+    height: calc(100% - 68px);
+}
+.mini-tokyo-3d #busroute-mark {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 24px;
+    height: 100%;
+}
+.mini-tokyo-3d .bus-panel #busroute-mark {
+    left: 10px;
+}
+.mini-tokyo-3d #bus-mark {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 44px;
+    height: calc(100% + 20px);
+}
+.mini-tokyo-3d .busstop-row {
+    display: table;
+    width: 100%;
+    margin: 5px 0;
+}
+.mini-tokyo-3d .busstop-row:last-child {
+    margin-bottom: 10px;
+}
+.mini-tokyo-3d .busstop-row:hover {
+    background-color: rgba(102, 102, 102, 0.7);
+}
+.mini-tokyo-3d .busstop-row > div {
+    display: table-cell;
+    vertical-align: middle;
+}
+.mini-tokyo-3d .busstop-row .busstop-title-box {
+    padding-left: 30px;
+}
+.mini-tokyo-3d .busstop-row .busstop-time-box {
+    width: 0;
+    text-align: right;
 }
 .mini-tokyo-3d .station-panel.station-to,
 .mini-tokyo-3d .station-panel.station-from {
@@ -825,14 +871,6 @@
 .mini-tokyo-3d .highlighted .mapboxgl-popup-content {
     background-color: rgba(102, 102, 102, 0.7);
 }
-.mini-tokyo-3d .popup-green-cars .mapboxgl-popup-content {
-    padding: 5px 10px;
-    color: #57B544;
-    font-weight: bold;
-}
-.mini-tokyo-3d .popup-green-cars .mapboxgl-popup-content:before {
-    content: "G";
-}
 .mini-tokyo-3d .popup-exit .mapboxgl-popup-content {
     padding: 5px 10px;
 }
@@ -899,9 +937,6 @@
 .mini-tokyo-3d .desc-caution {
     color: #f90;
 }
-.mini-tokyo-3d .desc-green-cars {
-    color: #57B544;
-}
 .mini-tokyo-3d .desc-first-row {
     width: 312px;
     white-space: nowrap;
@@ -923,7 +958,8 @@
     width: 10px;
     height: 16px;
 }
-.mini-tokyo-3d .train-type-label {
+.mini-tokyo-3d .train-type-label,
+.mini-tokyo-3d .bus-route-label {
     padding: 2px 2px 1px 2px;
     border-radius: 3px;
     color: #333;

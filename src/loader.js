@@ -1,5 +1,10 @@
+import * as Comlink from 'comlink';
+import geobuf from 'geobuf';
+import GtfsRealtimeBindings from 'gtfs-realtime-bindings';
+import Pbf from 'pbf';
 import configs from './configs';
 import {loadJSON, removePrefix} from './helpers/helpers';
+import {decode} from './helpers/helpers-gtfs';
 
 const RAILWAYS_FOR_TRAINS = {
     odpt: [
@@ -231,4 +236,42 @@ export function loadDynamicFlightData() {
         atisData: data[0],
         flightData: data[1]
     }));
+}
+
+export function loadBusData(sources, lang) {
+    const workerUrl = URL.createObjectURL(new Blob([`WORKER_STRING`], {type: 'text/javascript'})),
+        worker = new Worker(workerUrl),
+        proxy = Comlink.wrap(worker);
+
+    return new Promise(resolve => proxy.load(sources, lang, Comlink.proxy(data => {
+        const gtfsData = data.map((items, i) => ({
+            featureCollection: geobuf.decode(new Pbf(items[0])),
+            ...decode(new Pbf(items[1])),
+            vehiclePositionUrl: sources[i].vehiclePositionUrl,
+            color: sources[i].color
+        }));
+
+        proxy[Comlink.releaseProxy]();
+        worker.terminate();
+        resolve(gtfsData);
+    })));
+}
+
+export function loadDynamicBusData(gtfsArray) {
+    return Promise.all(gtfsArray.map(gtfs => fetch(gtfs.vehiclePositionUrl)
+        .then(response => response.arrayBuffer())
+        .then(data => ({
+            gtfs,
+            vehiclePosition: GtfsRealtimeBindings.transit_realtime.FeedMessage.decode(new Uint8Array(data))
+        }))
+    ));
+}
+
+export function updateOdptUrl(url, secrets) {
+    if (url.startsWith('https://api.odpt.org/') && !url.match(/acl:consumerKey/)) {
+        return `${url}${url.match(/\?/) ? '&' : '?'}acl:consumerKey=${secrets.odpt}`;
+    } else if (url.startsWith('https://api-challenge2024.odpt.org/') && !url.match(/acl:consumerKey/)) {
+        return `${url}${url.match(/\?/) ? '&' : '?'}acl:consumerKey=${secrets.challenge2024}`;
+    }
+    return url;
 }

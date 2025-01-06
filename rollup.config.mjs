@@ -4,7 +4,6 @@ import commonjs from '@rollup/plugin-commonjs';
 import replace from '@rollup/plugin-replace';
 import image from '@rollup/plugin-image';
 import terser from '@rollup/plugin-terser';
-import sass from 'node-sass';
 import postcss from 'rollup-plugin-postcss';
 import {visualizer} from "rollup-plugin-visualizer";
 import cssimport from 'postcss-import';
@@ -18,10 +17,6 @@ const banner = `/*!
  * (c) 2019-${new Date().getFullYear()} ${pkg.author}
  * Released under the ${pkg.license} license
  */`;
-const sassRender = (content, id) => new Promise((resolve, reject) => {
-	const result = sass.renderSync({file: id});
-	resolve({code: result.css.toString()});
-});
 
 const onwarn = (warning, defaultHandler) => {
 	const {code, message} = warning;
@@ -29,6 +24,9 @@ const onwarn = (warning, defaultHandler) => {
 		return;
 	}
 	if ((code == 'MISSING_EXPORT' || code == 'EVAL') && message.includes('@loaders.gl')) {
+		return;
+	}
+	if ((code == 'CIRCULAR_DEPENDENCY' || code == 'EVAL') && message.includes('protobufjs')) {
 		return;
 	}
 	defaultHandler(warning);
@@ -48,6 +46,26 @@ export default [{
 		commonjs()
 	]
 }, {
+	input: 'src/worker.js',
+	output: {
+		file: `dist/${pkg.name}-worker.js`,
+		format: 'umd',
+		indent: false
+	},
+	plugins: [
+		resolve({
+			browser: true,
+			preferBuiltins: false
+		}),
+		commonjs(),
+		terser({
+			compress: {
+				pure_getters: true
+			}
+		}),
+		strip()
+	]
+}, {
 	input: 'src/index.js',
 	output: {
 		name: 'mt3d',
@@ -63,7 +81,6 @@ export default [{
 			preferBuiltins: false
 		}),
 		postcss({
-			preprocessor: sassRender,
 			plugins: [
 				cssimport(),
 				inlinesvg()
@@ -75,7 +92,8 @@ export default [{
 			preventAssignment: true,
 			'process.env.NODE_ENV': '\'development\'',
 			'log.error': '(() => () => {})',
-			'Math.min(1.01*a,i*(1/t._horizonShift))}': 'Math.max(i*(1/t._horizonShift),i+1000*t.pixelsPerMeter/Math.cos(t._pitch))}'
+			'Math.min(1.01*a,i*(1/t._horizonShift))}': 'Math.max(i*(1/t._horizonShift),i+1000*t.pixelsPerMeter/Math.cos(t._pitch))}',
+			'WORKER_STRING': () => fs.readFileSync(`dist/${pkg.name}-worker.js`, {encoding: 'utf8'}).replace(/(?=`|\${|\\)/g, '\\')
 		}),
 		replace({
 			preventAssignment: true,
@@ -119,7 +137,6 @@ export default [{
 			preferBuiltins: false
 		}),
 		postcss({
-			preprocessor: sassRender,
 			plugins: [
 				cssimport(),
 				inlinesvg()
@@ -132,7 +149,8 @@ export default [{
 			preventAssignment: true,
 			'process.env.NODE_ENV': '\'production\'',
 			'log.error': '(() => () => {})',
-			'Math.min(1.01*a,i*(1/t._horizonShift))}': 'Math.max(i*(1/t._horizonShift),i+1000*t.pixelsPerMeter/Math.cos(t._pitch))}'
+			'Math.min(1.01*a,i*(1/t._horizonShift))}': 'Math.max(i*(1/t._horizonShift),i+1000*t.pixelsPerMeter/Math.cos(t._pitch))}',
+			'WORKER_STRING': () => fs.readFileSync(`dist/${pkg.name}-worker.js`, {encoding: 'utf8'}).replace(/(?=`|\${|\\)/g, '\\')
 		}),
 		replace({
 			preventAssignment: true,
@@ -183,7 +201,6 @@ export default [{
 			preferBuiltins: false
 		}),
 		postcss({
-			preprocessor: sassRender,
 			plugins: [
 				cssimport(),
 				inlinesvg()
@@ -194,7 +211,8 @@ export default [{
 			preventAssignment: true,
 			'process.env.NODE_ENV': '\'production\'',
 			'log.error': '(() => () => {})',
-			'Math.min(1.01*a,i*(1/t._horizonShift))}': 'Math.max(i*(1/t._horizonShift),i+1000*t.pixelsPerMeter/Math.cos(t._pitch))}'
+			'Math.min(1.01*a,i*(1/t._horizonShift))}': 'Math.max(i*(1/t._horizonShift),i+1000*t.pixelsPerMeter/Math.cos(t._pitch))}',
+			'WORKER_STRING': () => fs.readFileSync(`dist/${pkg.name}-worker.js`, {encoding: 'utf8'}).replace(/(?=`|\${|\\)/g, '\\')
 		}),
 		replace({
 			preventAssignment: true,
